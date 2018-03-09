@@ -1,225 +1,81 @@
-# custom docker image based off the stock php one, includes Drupal dependencies and testing dependencies
-# see details here: https://github.com/smmccabe/docker/blob/master/Dockerfile
-image: smmccabe/drupal:latest
-#image: smmccabe/drupal:php7
-#image: smmccabe/drupal:php5.6
-
-variables:
-  MYSQL_DATABASE: drupal
-  MYSQL_SQL_TO_RUN: 'GRANT ALL ON *.* TO "testrunner"@"%";'
-  MYSQLD_RAM_SIZE: '1024'
-
-# jobs do not need to be present for all stages, if a stage has no jobs it will just be ignored
+image: tetraweb/php:7.0 # Important: Same as target platform.
 stages:
-  - test
-  - build
   - deploy
-
-code_standards:
-  stage: test
-  script:
-    # runs the Drupal code standards checks on our custom code
-    # the Drupal Code Standards come from the Coder module, which is automatically part of the base testing image
-    - phpcs --standard=Drupal -n --extensions=php,module,inc,install,test,profile,theme,css,info,txt,md web/modules/custom
-    - phpcs --standard=Drupal -n --extensions=php,module,inc,install,test,profile,theme,css,info,txt,md web/themes/custom --ignore=*.css
-
-custom_tests_d8:
-  stage: test
-  when: manual
-
-  services:
-  - theasci/docker-mysql-tmpfs:latest
-
-  script:
-    # apache should be running by default, and does on my local, but gitlabci
-    # prevents that for some reason, so we manually start it
-    # the & is important so it doesn't block everything below it from running.
-    - apache2-foreground > /dev/null 2>&1 &
-
-    # move to the webroot
-    - cp . /var/www/html/ -rf
-    - cd /var/www/html
-
-    # if you have issues with rate limiting, you'll want to setup a github key variable and uncomment the config line below
-    # https://getcomposer.org/doc/articles/troubleshooting.md#api-rate-limit-and-oauth-tokens
-    #- composer config -g github-oauth.github.com $DEPLOY_GITHUB
-
-    - composer install
-
-    #install the drupal site provided by the docker image so we can use it for testing
-    - cd web
-    - drush site-install standard --db-url='mysql://testrunner:@theasci__docker-mysql-tmpfs/drupal' -y
-
-    - export SIMPLETEST_DB='mysql://testrunner:@theasci__docker-mysql-tmpfs/drupal'
-    - export SIMPLETEST_BASE_URL=http://localhost
-    - export BROWSERTEST_OUTPUT_DIRECTORY=/tmp
-    #- ../vendor/phpunit/phpunit/phpunit -c core/phpunit.xml.dist --group SITENAME
-    - echo 'No custom unit tests currently, edit config if they are added'
-
-build:
-  stage: build
-
-  # NOTE: Master is also pushed to public accessible GitHub repo: https://github.com/AcroMedia/commerce-demo
-  only:
-    - master
-    - UAT
-
-  # this tells the build server to save these files between jobs, this keeps them to be deployed
-  artifacts:
-    paths:
-      - bin
-      - vendor
-      - web
-
-  script:
-    # Run Composer to build site (use --no-dev for production builds).
-    - composer install --no-interaction --no-dev
-    # Compile Sass from theme.
-    - cd web/themes/custom/commerce_2_demo
-    - npm install
-    - gulp sass
-    # Remove the node_modules dir generated from npm install.
-    - rm -rf node_modules
-
-# Deploy base demo to STAGING site (AWS1).
-base-demo-to-uat:
+.deploy: &deploy
   stage: deploy
-  when: manual
-
-  # add any other tags or branches you want here
-  only:
-    - UAT
-
-  environment:
-    name: uat
-    url: https://commerce-2-demo.aws1.acrobuild.com
-
   script:
-    # Install ssh-agent if not already installed, it is required by Docker
-    - 'which ssh-agent || ( apt-get update -y && apt-get install openssh-client -y )'
-
-    # Run ssh-agent (inside the build environment)
-    - eval $(ssh-agent -s)
-
-    # Add the SSH key stored in SSH_PRIVATE_KEY variable to the agent store
-    - ssh-add <(echo "$DEPLOY_KEY_UAT")
-
-    # Add the fingerprint for the host to known hosts so we can verify it.
-    # To determine the fingerprint of a host, use `ssh-keyscan -H`.
+    # Expects variables
+    # REPO_BRANCH - defaults to master.
+    - '[[ $REPO_BRANCH ]] || REPO_BRANCH=master'
+    # SSH_PUBKEYS - use ssh-keyscan.
+    - 'echo "SSH_PUBKEYS=''$SSH_PUBKEYS''"'
+    # SSH_PRIVATE_KEY - Private ssh key to push with.
+    - '[[ $SSH_PRIVATE_KEY ]] || { echo "Missing SSH_PRIVATE_KEY."; exit 1; }'
+    # REPO_URL_FOO (e.g. REPO_URL_LIVE)- URL to git deployment repo.
+    - REPO_URL_VAR="REPO_URL_${CI_COMMIT_REF_NAME^^}"
+    - REPO_URL=${!REPO_URL_VAR}
+    - '[[ $REPO_URL ]] && echo "REPO_URL=$REPO_URL" || { echo "Missing $REPO_URL_VAR."; exit 1; }'
+    # SSH_URL_FOO (e.g. SSH_URL_LIVE)- URL to SSH.
+    - SSH_URL_VAR="SSH_URL_${CI_COMMIT_REF_NAME^^}"
+    - SSH_URL=${!SSH_URL_VAR}
+    - '[[ $SSH_URL ]] && echo "SSH_URL=$SSH_URL" || { echo "Missing $SSH_URL_VAR."; exit 1; }'
+    # SITE_URL_FOO (e.g. SITE_URL_LIVE)- URL to site.
+    - SITE_URL_VAR="SITE_URL_${CI_COMMIT_REF_NAME^^}"
+    - SITE_URL=${!SITE_URL_VAR}
+    - '[[ $SITE_URL ]] && echo "SITE_URL=$SITE_URL" || { echo "Missing $SITE_URL_VAR."; exit 1; }'
+    - SITE_SERVER=$(echo "$SITE_URL" | cut -d'/' -f3)
+    - '[[ $SITE_SERVER ]] && echo "SITE_SERVER=$SITE_SERVER" || { echo "Unrecognized server name in $SITE_URL_VAR."; exit 1; }'
+    # crontab.freistilbox file.
+    - '[[ -f settings/custom/crontab/freistilbox.txt ]] && { CRONTAB=$(echo SERVER_NAME=$SITE_SERVER; cat settings/custom/crontab/freistilbox.txt); echo "CRONTAB=''$CRONTAB''"; } || { echo "Missing file crontab.freistilbox."; exit 1; }'
+    # Prepare
+    - which ssh-agent || ( apt-get update -y && apt-get install openssh-client -y )
+    - eval $(ssh-agent -s) # Prepare env.
+    - ssh-add <(echo "$SSH_PRIVATE_KEY")
     - mkdir -p ~/.ssh
-    - echo "$UAT_FINGERPRINT" >> ~/.ssh/known_hosts
-
-    #move updated files up to deployment server, exclude .git since it's not needed
-    - rsync -av --no-perms --no-owner --no-group --exclude-from '.gitlabci-rsync-exclude.txt' --exclude '.git' --delete ./ commerce-2-demo@aws1.acrobuild.com:/home/commerce-2-demo/www/commerce-2-demo/
-
-    # log into the site, reset settings.php permissions and run scripts.
-    # IMPORTANT: Drupal 8.4 and Drush need PHP 7.1 but server defaults to 7.0. Need script to check PHP version and use the right one.
-    - ssh commerce-2-demo@aws1.acrobuild.com 'chown commerce-2-demo:commerce-2-d-srv /home/commerce-2-demo/www/commerce-2-demo/web/sites/default/settings.php && /bin/bash -u -e -s' < ./scripts/remote-drush-commands_base-uat.sh
-
-# Deploy plus demo to STAGING site (AWS1).
-plus-demo-to-uat:
-  stage: deploy
-  when: manual
-
-  # add any other tags or branches you want here
-  only:
-    - UAT
-
+    - '>>~/.ssh/known_hosts echo "$SSH_PUBKEYS"'
+    # Build
+    # Install 'bin' later as e.g. letsencrypta symlink depends on settings.
+    - apt-get update -y && apt-get install --yes unzip
+    - COMPOSER_ALLOW_SUPERUSER=1
+    - composer global require hirak/prestissimo bamarni/composer-bin-plugin --no-progress --optimize-autoloader --prefer-dist
+    - composer install --no-dev --no-progress --optimize-autoloader --prefer-dist
+    - '! composer help bin || composer bin all install --no-dev --no-progress --optimize-autoloader --prefer-dist'
+    - '[ -f docroot ] || ln -s web docroot'
+    # Set siteurl.php as freistilbox does not know its URL :-(.
+    - >-
+     { echo "<?php"; echo "return '$SITE_URL';"; } >settings/generated/local/siteurl.php
+    # Deploy
+    - git config --global user.email "$GITLAB_USER_EMAIL"
+    - git config --global user.name "$GITLAB_USER_NAME"
+    - git remote add REPO $REPO_URL
+    - git fetch REPO $REPO_BRANCH
+    - git checkout -B TMP_DEPLOYMENT_BRANCH
+    - git reset --soft REPO/$REPO_BRANCH
+    - find * -name .git -type d -prune |xargs -rt rm -rf
+    - git ls-files --stage|(grep ^160000||true)|tee|cut -f2|xargs -rt git rm --cached
+    - git add --all --force .
+    - git commit -m "Autodeploy" --allow-empty
+    - git push REPO HEAD:$REPO_BRANCH
+    - COMMIT=$(git rev-parse HEAD)
+    # Wait
+    - (for i in {1..10}; do [ "$COMMIT" = "$(ssh $SSH_URL 'basename $(readlink .deploy/current)')" ] && exit; echo "Retry $i"; sleep 2; done; exit 1); sleep 3
+    # Revert
+    - ssh $SSH_URL 'cd current/docroot; BOOT=$(../vendor/bin/drush status --fields=bootstrap) && [ $? -eq 0 ] && [ ! "$BOOT" ] || ../vendor/bin/drush -y updb'
+    - ssh $SSH_URL 'cd current/docroot; BOOT=$(../vendor/bin/drush status --fields=bootstrap) && [ $? -eq 0 ] && [ ! "$BOOT" ] || [ ! -f ../config-sync/core.extension.yml ] || ../vendor/bin/drush -y cim'
+    # Set crontab
+    - ssh $SSH_URL "echo '$CRONTAB' |{ crontab -; } "
+deploy-live:
+  <<: *deploy
   environment:
-    name: uat
-    url: https://commerceplus.aws1.acrobuild.com
-
-  script:
-    # Install ssh-agent if not already installed, it is required by Docker
-    - 'which ssh-agent || ( apt-get update -y && apt-get install openssh-client -y )'
-
-    # Run ssh-agent (inside the build environment)
-    - eval $(ssh-agent -s)
-
-    # Add the SSH key stored in SSH_PRIVATE_KEY variable to the agent store
-    - ssh-add <(echo "$DEPLOY_KEY_UAT")
-
-    # Add the fingerprint for the host to known hosts so we can verify it.
-    # To determine the fingerprint of a host, use `ssh-keyscan -H`.
-    - mkdir -p ~/.ssh
-    - echo "$UAT_FINGERPRINT" >> ~/.ssh/known_hosts
-
-    #move updated files up to deployment server, exclude .git since it's not needed.
-    - rsync -av --no-perms --no-owner --no-group --exclude-from '.gitlabci-rsync-exclude.txt' --exclude '.git' --delete ./ commerce-2-demo@aws1.acrobuild.com:/home/commerce-2-demo/www/commerceplus/
-
-    # log into the site, reset settings.php permissions and run scripts.
-    # IMPORTANT: Drupal 8.4 and Drush need PHP 7.1 but server defaults to 7.0. Need script to check PHP version and use the right one.
-    - ssh commerce-2-demo@aws1.acrobuild.com 'chown commerce-2-demo:commerce-2-dem-commerceplus-srv /home/commerce-2-demo/www/commerceplus/web/sites/default/settings.php && /bin/bash -u -e -s' < ./scripts/remote-drush-commands_plus-uat.sh
-
-
-# Deploy base demo to LIVE site (CLOUD4).
-base-demo-to-live:
-  stage: deploy
-  when: manual
-
-  # add any other tags or branches you want here
-  # NOTE: Master is also pushed to public accessible GitHub repo: https://github.com/AcroMedia/commerce-demo
+    name: live
+    url: $SITE_URL_LIVE
   only:
-    - master
-
+    - live
+deploy-test:
+  <<: *deploy
   environment:
-    name: cloud4
-    url: https://commercedemo.acromedia.com
-
-  script:
-    # Install ssh-agent if not already installed, it is required by Docker
-    - 'which ssh-agent || ( apt-get update -y && apt-get install openssh-client -y )'
-
-    # Run ssh-agent (inside the build environment)
-    - eval $(ssh-agent -s)
-
-    # Add the SSH key stored in SSH_PRIVATE_KEY variable to the agent store
-    - ssh-add <(echo "$DEPLOY_KEY_CLIENT_DEMO")
-
-    # Add the fingerprint for the host to known hosts so we can verify it.
-    # To determine the fingerprint of a host, use `ssh-keyscan -H`.
-    - mkdir -p ~/.ssh
-    - echo "$PRODUCTION_FINGERPRINT" >> ~/.ssh/known_hosts
-
-    # Install composer and move updated files up to deployment server, exclude .git since it's not needed
-    - rsync -av --no-perms --no-owner --no-group --exclude-from '.gitlabci-rsync-exclude.txt' --exclude '.git' --delete ./ drupalcommerce@cloud4.acromedia.com:/home/drupalcommerce/www/demo/
-
-    # log into the site, reset settings.php permissions and run scripts.
-    # IMPORTANT: Drupal 8.4 and Drush need PHP 7.1 but server defaults to 7.0. Need script to check PHP version and use the right one.
-    - ssh drupalcommerce@cloud4.acromedia.com 'chown drupalcommerce:drupalcommerce-demo-srv /home/drupalcommerce/www/demo/web/sites/default/settings.php && /bin/bash -u -e -s' < ./scripts/remote-drush-commands_base-live.sh
-
-# Deploy plus demo to LIVE site (CLOUD4).
-plus-demo-to-live:
-  stage: deploy
-  when: manual
-
-  # add any other tags or branches you want here.
-  # NOTE: Master is also pushed to public accessible GitHub repo: https://github.com/AcroMedia/commerce-demo
+    name: test
+    url: $SITE_URL_TEST
   only:
-    - master
+    - test
 
-  environment:
-    name: cloud4
-    url: https://demoplus.cloud4.acromedia.com
-
-  script:
-    # Install ssh-agent if not already installed, it is required by Docker
-    - 'which ssh-agent || ( apt-get update -y && apt-get install openssh-client -y )'
-
-    # Run ssh-agent (inside the build environment)
-    - eval $(ssh-agent -s)
-
-    # Add the SSH key stored in SSH_PRIVATE_KEY variable to the agent store
-    - ssh-add <(echo "$DEPLOY_KEY_CLIENT_DEMO")
-
-    # Add the fingerprint for the host to known hosts so we can verify it.
-    # To determine the fingerprint of a host, use `ssh-keyscan -H`.
-    - mkdir -p ~/.ssh
-    - echo "$PRODUCTION_FINGERPRINT" >> ~/.ssh/known_hosts
-
-    # Install composer and move updated files up to deployment server, exclude .git since it's not needed
-    - rsync -av --no-perms --no-owner --no-group --exclude-from '.gitlabci-rsync-exclude.txt' --exclude '.git' --delete ./ drupalcommerce@cloud4.acromedia.com:/home/drupalcommerce/www/demoplus/
-
-    # log into the site, reset settings.php permissions and run scripts.
-    # IMPORTANT: Drupal 8.4 and Drush need PHP 7.1 but server defaults to 7.0. Need script to check PHP version and use the right one.
-    - ssh drupalcommerce@cloud4.acromedia.com 'chown drupalcommerce:drupalcommerce-demoplus-srv /home/drupalcommerce/www/demoplus/web/sites/default/settings.php && /bin/bash -u -e -s' < ./scripts/remote-drush-commands_plus-live.sh

@@ -16,7 +16,10 @@
         }
     },
     "config": {
-      "bin-dir": "bin"
+      "bin-dir": "bin",
+        "platform": {
+            "php": "7.0.17"
+        }
     },
     "require": {
         "ext-curl": "*",
