@@ -15,9 +15,9 @@ pipeline:
   - name: Update database
     command: drush -y updb
     directory: docroot
-    only_if: 'OK=$(drush status --fields=bootstrap);test $? -eq 0 -a $OK'
+    only_if: 'OK=$(drush status --fields=bootstrap);test $? -eq 0 -a "$OK"'
   - name: Import config
     command: drush -y cim
     directory: docroot
-    only_if: 'OK=$(drush status --fields=bootstrap);test $? -eq 0 -a $OK && test -f ../config-sync/core.extension.yml'
+    only_if: 'OK=$(drush status --fields=bootstrap);test $? -eq 0 -a "$OK" && test -f ../config-sync/core.extension.yml'
 
